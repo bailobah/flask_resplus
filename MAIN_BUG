@@ -1,0 +1,165 @@
+package com.socgen.iot.spark
+
+import java.sql.Date
+
+import com.beust.jcommander.{JCommander, MissingCommandException}
+import com.socgen.iot.spark.Constants._
+import com.socgen.iot.spark.applicationContext.SparkIotContext
+import com.socgen.iot.spark.load.models.RefRglSDC
+import com.socgen.iot.spark.utils.CommandLineArgs
+import com.socgen.iot.spark.utils.CommandLineArgs._
+import com.socgen.iot.spark.utils.SparkUtils.{getSDCReferential, mdpUDF, withAddCurrenDate}
+import org.apache.log4j.{LogManager, Logger}
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions._
+
+/**
+  * @author X176616 (bailo.bah-ext@socgen.com)
+  * @version 1.0
+  * @since 29/10/2018 
+  *        Societe Generale Technology Solutions
+  */
+object Main extends SparkIotContext {
+
+  private lazy val LOG: Logger = LogManager.getLogger(Main.getClass)
+
+
+
+  var TcoDF : DataFrame = _
+  var TcbDF : DataFrame = _
+  var RefEsDF : DataFrame = _
+  val DB_BASE = s"$DB_DIR/$DB_NAME.db"
+
+  def main(args: Array[String]) {
+
+
+    import ss.implicits._
+
+    //val ( tcojLocation,tcbLocation, refEsLocation,dt )= parseArgs(args)
+    val ( tcojLocation,tcbLocation, refEsLocation,dt )= evaluate_options(args)
+
+    LOG.info(s"KAKONI LOG: $tcojLocation, $tcbLocation, $refEsLocation,$dt : db : $DB_BASE")
+
+    val job = new SimpleIotJob(ss)
+
+    /**
+      * Load TCOJ file into table
+      */
+
+    try{
+      TcoDF = job.loadTcoj(tcojLocation, dt).cache()
+      job.flushToHive(TcoDF, s"$DB_NAME.$TCOJ_TABBLE")
+
+      LOG.info(s"Successfully load tcoj file into $DB_NAME.$TCOJ_TABBLE ")
+
+    }catch{
+      case e : Exception =>{
+        LOG.error(s" Could not load data from tcoj in $DB_NAME.$TCOJ_TABBLE [ ${e.getMessage} ]")
+      }
+    }
+
+    /**
+      * Load TCB file into table
+      */
+
+    try{
+      TcbDF = job.loadTransCb(tcbLocation, dt)
+      job.flushToHive(TcbDF, s"$DB_NAME.$TCB_TABLE")
+
+      LOG.info(s"Successfully load tcb file into $DB_NAME.$TCB_TABLE")
+
+    }catch{
+      case e : Exception =>{
+        LOG.error(s" Could not load data in $DB_NAME.$TCB_TABLE [  ${e.getMessage} ]")
+      }
+    }
+
+    /**
+      * Load RefEs file into table
+      */
+    try{
+
+      RefEsDF = job.loadRefEs(refEsLocation, dt)
+      job.flushToHive(RefEsDF, s"$DB_NAME.$REF_ES_TABLE")
+
+      LOG.info(s"Successfully load refes file into $DB_NAME.$REF_ES_TABLE")
+    }catch{
+      case e : Exception =>{
+        LOG.error(s"Could not load data in $DB_NAME.$REF_ES_TABLE  [ ${e.getMessage}  ]")
+      }
+    }
+
+    //try create table mdp
+    val refRglFileName = s"$DB_BASE/$REF_RGL_CAT_TABLE"
+
+
+    val DS_REF = job.loadReferential(refRglFileName)
+    DS_REF.cache()
+
+    /**
+      * MDP
+      */
+    try {
+      val mdpReferential: Array[RefRglSDC] = getSDCReferential(ss,DS_REF, ";MDP;")
+      val bRef = context.broadcast(mdpReferential)
+
+      val MDP_DF = TcoDF.select(MDP_COLUMNS_NAMES.dropRight(1).map(name=> col(name)):_*)
+        .withColumn("axemdp", mdpUDF(bRef)($"signe",$"cdopcz",$"lib_ope",$"qualif_lib_ope"))
+        .select(MDP_COLUMNS_NAMES.head, MDP_COLUMNS_NAMES.tail:_*)
+        .transform(withAddCurrenDate(Date.valueOf(dt)))
+      job.flushToHive(MDP_DF, s"$DB_NAME.$MDP_TABLE_TMP")
+      LOG.info(s"Successfully load data into $DB_NAME.$MDP_TABLE_TMP")
+
+    }catch{
+      case e : Exception =>{
+        LOG.error(s"Could not load data in $DB_NAME.$MDP_TABLE_TMP [ ${e.getMessage}  ]")
+      }
+    }
+
+    /**
+      * OBJ
+      */
+    val redGdbFileName = $"$DB_BASE/$REF_GDB_TABLE"
+
+    DS_REF.unpersist()
+
+    //stop spark
+    shutdown()
+
+  }
+
+
+//  def parseArgs(args: Array[String]): (String, String, String, String) = {
+//    val jCommander = JCommander.newBuilder().programName(this.getClass.getSimpleName).addObject(CommandLineArgs).build()
+//    try{
+//      jCommander.parse(args:_*)
+//
+//    }catch {
+//      case mce: MissingCommandException =>
+//        LOG.warn(mce.getMessage)
+//        LOG.info("KAKONI : " + jCommander.getCommands)
+//        LOG.info("KAKONI : " + jCommander.getMainParameterValue)
+//        jCommander.usage()
+//
+//      case e : Exception => {
+//        //
+//        //        e.printStackTrace
+//        //        usage()
+//        LOG.error(s"Could not parse arguments, message: ${e.getMessage()} ")
+//        LOG.error("KAKONI : :)")
+//        LOG.info("KAKONI : " + jCommander.getCommands)
+//        LOG.info("KAKONI : " + jCommander.getMainParameterValue)
+//        System.exit(EXIT_UN)
+//      }
+//
+//    }
+//
+//    if (CommandLineArgs.help) {
+//      jCommander.usage()
+//      System.exit(EXIT_ZERO)
+//    }
+//    (CommandLineArgs.inputTcojPath, CommandLineArgs.inputTcbPath, CommandLineArgs.inputRefEsPath, CommandLineArgs.dt)
+//
+//  }
+
+}
